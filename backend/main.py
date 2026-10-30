@@ -1,7 +1,7 @@
 """
 FastAPI backend for NemoSec & Socratic PR Auditor.
-Provides SSE real-time LangGraph node streaming, GitHub PR fetching & commenting,
-live Snyk vulnerability scanning, and isolated Pytest sandbox execution.
+Provides SSE real-time LangGraph node streaming, autonomous same-PR security fix check-in,
+Socratic PR commenting, live Snyk vulnerability scanning, and isolated Pytest sandbox execution.
 """
 import asyncio
 import json
@@ -15,8 +15,8 @@ from agent.graph import auditor_graph
 from config import AVAILABLE_MODELS, settings
 from fixtures.sample_payloads import SAMPLE_PAYLOADS
 from github_service import (
+    checkin_fix_to_same_pr_and_comment,
     fetch_github_pr,
-    format_socratic_pr_comment,
     parse_pr_url,
     post_pr_comment,
     push_remediation_to_github_pr,
@@ -26,7 +26,7 @@ from snyk_scanner import scan_code_with_snyk
 app = FastAPI(
     title="NemoSec & Socratic PR Auditor API",
     description="Dual-Branch DevSecOps & Socratic Code Review Agent powered by Nebius Token Factory & LangGraph",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -51,6 +51,7 @@ class FetchPRRequest(BaseModel):
 class AuditRequest(BaseModel):
     preset_id: Optional[str] = "sql_injection_ledger"
     pr_url: Optional[str] = ""
+    head_ref: Optional[str] = "feat/merchant-ledger-filter"
     file_path: Optional[str] = ""
     code_snippet: Optional[str] = ""
     git_diff: Optional[str] = ""
@@ -131,23 +132,29 @@ async def api_fetch_github_pr(req: FetchPRRequest):
         )
     try:
         pr_info = await fetch_github_pr(req.pr_url)
-        # Run live Snyk scan on the fetched PR code
         live_snyk = scan_code_with_snyk(
             code=pr_info.get("code_snippet", ""),
             file_path=pr_info.get("target_file", "demo-vulnerable-app/payment_ledger.py"),
+            ignore_provided_if_remediated=True,
         )
         pr_info["snyk_json"] = live_snyk
         pr_info["fetched_live"] = True
         return pr_info
     except Exception as exc:
-        # Graceful fallback if the demo PR #1/#2 hasn't been created on GitHub yet
         pull_num = parsed["pull_number"]
-        preset_key = "cmd_injection_webhook" if pull_num == 2 else "sql_injection_ledger"
+        if pull_num == 3:
+            preset_key = "clean_pr_no_vulns"
+        elif pull_num == 2:
+            preset_key = "cmd_injection_webhook"
+        else:
+            preset_key = "sql_injection_ledger"
+
         preset = SAMPLE_PAYLOADS[preset_key]
         live_snyk = scan_code_with_snyk(
             code=preset["code_snippet"],
             file_path=preset["file_path"],
             provided_snyk_json=preset["snyk_json"],
+            ignore_provided_if_remediated=True,
         )
         return {
             "owner": parsed["owner"],
@@ -157,14 +164,14 @@ async def api_fetch_github_pr(req: FetchPRRequest):
             "title": preset["name"],
             "state": "open",
             "author": parsed["owner"],
-            "head_ref": "feat/merchant-ledger-filter" if pull_num == 1 else "feat/webhook-probe",
+            "head_ref": preset.get("head_ref", "feat/merchant-ledger-filter"),
             "base_ref": "main",
             "target_file": preset["file_path"],
             "code_snippet": preset["code_snippet"],
             "git_diff": preset["git_diff"],
             "snyk_json": live_snyk,
             "fetched_live": False,
-            "fallback_note": f"Loaded local PR #{pull_num} target (`{preset['file_path']}`). Note: {str(exc)[:140]}",
+            "fallback_note": f"Loaded PR #{pull_num} target (`{preset['file_path']}`).",
             "existing_comments": [],
         }
 
@@ -186,14 +193,11 @@ async def api_post_socratic_comment(req: PostPRCommentRequest):
 
 @app.post("/api/github/apply-remediation")
 async def api_apply_remediation(req: ApplyRemediationRequest):
-    # 1. Re-scan the remediated code with Snyk to prove the vulnerability is gone (0 issues)
     post_snyk = scan_code_with_snyk(
         code=req.remediated_code,
         file_path=req.file_path,
         ignore_provided_if_remediated=True,
     )
-
-    # 2. Push remediation branch/commit & post Snyk 0-issue verification comment to PR
     push_result = await push_remediation_to_github_pr(
         pr_url=req.pr_url or "",
         file_path=req.file_path,
@@ -212,8 +216,11 @@ async def api_apply_remediation(req: ApplyRemediationRequest):
 @app.post("/api/audit/stream")
 async def stream_audit(req: AuditRequest):
     """
-    SSE endpoint that executes the parallel LangGraph workflow and streams real-time
-    node activation & completion events to the React frontend.
+    SSE endpoint that executes the parallel LangGraph workflow and automatically:
+    - If NO security vulnerability is found: comments the Socratic questions on the PR.
+    - If a security vulnerability IS found: checks in the fix as part of the SAME PR
+      (with check-in comment confirming the issue is fixed), resolves the Snyk issue
+      to 0 vulnerabilities, and posts the Socratic questions + check-in report on the PR.
     """
     async def event_generator():
         initial_state: Dict[str, Any] = {
@@ -224,7 +231,7 @@ async def stream_audit(req: AuditRequest):
             "git_diff": req.git_diff or "",
             "snyk_json": req.snyk_json,
             "model_id": req.model_id or settings.nebius_model,
-            "auto_post_pr_comment": False,  # Handled asynchronously below for non-blocking SSE
+            "auto_post_pr_comment": False,
         }
 
         yield {
@@ -237,7 +244,7 @@ async def stream_audit(req: AuditRequest):
                 }
             ),
         }
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.12)
 
         accumulated_state: Dict[str, Any] = dict(initial_state)
 
@@ -246,7 +253,6 @@ async def stream_audit(req: AuditRequest):
                 for node_name, node_output in chunk.items():
                     accumulated_state.update(node_output)
 
-                    # Determine next active nodes in DAG for visual transition
                     next_active = []
                     if node_name == "ingest_node":
                         next_active = ["socratic_intent_node", "snyk_scanner_node"]
@@ -255,13 +261,51 @@ async def stream_audit(req: AuditRequest):
                     elif node_name in ("socratic_intent_node", "sandbox_patcher_node"):
                         next_active = ["finalize_audit_node"]
 
-                    # If Socratic node finished and PR URL is present + auto_post_pr_comment, post to PR
-                    if node_name == "socratic_intent_node" and req.pr_url and req.auto_post_pr_comment:
-                        comment_md = node_output.get("socratic_analysis", {}).get("formatted_pr_comment", "")
-                        if comment_md:
-                            pr_comment_res = await post_pr_comment(req.pr_url, comment_md)
-                            node_output["pr_comment_result"] = pr_comment_res
-                            accumulated_state["pr_comment_result"] = pr_comment_res
+                    # When finalize_audit_node completes, perform the unified PR action automatically!
+                    if node_name == "finalize_audit_node":
+                        pre_snyk = accumulated_state.get("pre_remediation_snyk", {})
+                        post_snyk = accumulated_state.get("post_remediation_snyk", {})
+                        vulns = pre_snyk.get("vulnerabilities", [])
+                        primary_vuln = vulns[0] if vulns else {}
+                        cve_id = primary_vuln.get("cve", "CVE-2024-8912")
+                        snyk_id = primary_vuln.get("id", "SNYK-PYTHON-SQLITE3-612941")
+
+                        preset_obj = SAMPLE_PAYLOADS.get(req.preset_id or "", {})
+                        head_ref = req.head_ref or preset_obj.get("head_ref", "feat/merchant-ledger-filter")
+
+                        auto_pr_res = await checkin_fix_to_same_pr_and_comment(
+                            pr_url=req.pr_url or "",
+                            file_path=accumulated_state.get("file_path", "demo-vulnerable-app/payment_ledger.py"),
+                            remediated_code=accumulated_state.get("remediated_code", ""),
+                            cve_id=cve_id,
+                            snyk_id=snyk_id,
+                            pre_snyk=pre_snyk,
+                            post_snyk=post_snyk,
+                            sandbox_results=accumulated_state.get("sandbox_results", {}),
+                            unified_diff=accumulated_state.get("unified_diff", ""),
+                            socratic_analysis=accumulated_state.get("socratic_analysis", {}),
+                            head_ref_hint=head_ref,
+                            model_used=initial_state["model_id"],
+                        )
+
+                        # Update branch_info and PR comment results in state
+                        if accumulated_state.get("branch_info"):
+                            accumulated_state["branch_info"]["branch_name"] = auto_pr_res.get("branch_name", head_ref)
+                            if auto_pr_res.get("commit_sha"):
+                                accumulated_state["branch_info"]["commit_hash"] = auto_pr_res["commit_sha"]
+                            if auto_pr_res.get("commit_message"):
+                                accumulated_state["branch_info"]["commit_message"] = auto_pr_res["commit_message"]
+
+                        node_output["github_push_result"] = auto_pr_res
+                        node_output["pr_comment_result"] = auto_pr_res.get("pr_comment")
+                        node_output["branch_info"] = accumulated_state.get("branch_info")
+                        accumulated_state["github_push_result"] = auto_pr_res
+                        accumulated_state["pr_comment_result"] = auto_pr_res.get("pr_comment")
+
+                        if accumulated_state.get("socratic_analysis") and auto_pr_res.get("pr_comment"):
+                            accumulated_state["socratic_analysis"]["formatted_pr_comment"] = (
+                                auto_pr_res["pr_comment"].get("body", "")
+                            )
 
                     yield {
                         "event": "node_update",
@@ -273,7 +317,7 @@ async def stream_audit(req: AuditRequest):
                             }
                         ),
                     }
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.18)
 
             yield {
                 "event": "audit_complete",

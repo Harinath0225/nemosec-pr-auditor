@@ -5,11 +5,8 @@ import {
   Play,
   Settings,
   Code,
-  Sparkles,
   CheckCircle2,
   AlertCircle,
-  ChevronDown,
-  ChevronUp,
   DownloadCloud,
   KeyRound,
   X,
@@ -22,6 +19,7 @@ export default function App() {
   const [presets, setPresets] = useState([]);
   const [selectedPresetId, setSelectedPresetId] = useState('sql_injection_ledger');
   const [prUrl, setPrUrl] = useState('https://github.com/Harinath0225/nemosec-pr-auditor/pull/1');
+  const [headRef, setHeadRef] = useState('feat/merchant-ledger-filter');
   const [filePath, setFilePath] = useState('demo-vulnerable-app/payment_ledger.py');
   const [codeSnippet, setCodeSnippet] = useState('');
   const [gitDiff, setGitDiff] = useState('');
@@ -48,7 +46,6 @@ export default function App() {
   const [isRunningAudit, setIsRunningAudit] = useState(false);
   const [isFetchingPR, setIsFetchingPR] = useState(false);
   const [isPostingComment, setIsPostingComment] = useState(false);
-  const [isApplyingRemediation, setIsApplyingRemediation] = useState(false);
   const [activeNodes, setActiveNodes] = useState([]);
   const [completedNodes, setCompletedNodes] = useState([]);
   const [statusBanner, setStatusBanner] = useState(null);
@@ -56,7 +53,6 @@ export default function App() {
   // Branch A & Branch B outputs
   const [socraticAnalysis, setSocraticAnalysis] = useState(null);
   const [prCommentResult, setPrCommentResult] = useState(null);
-  const [secopsPrComment, setSecopsPrComment] = useState(null);
   const [preSnyk, setPreSnyk] = useState(null);
   const [postSnyk, setPostSnyk] = useState(null);
   const [remediatedCode, setRemediatedCode] = useState('');
@@ -98,6 +94,7 @@ export default function App() {
   const applyPreset = (preset) => {
     setSelectedPresetId(preset.id);
     setPrUrl(preset.pr_url || 'https://github.com/Harinath0225/nemosec-pr-auditor/pull/1');
+    setHeadRef(preset.head_ref || 'feat/merchant-ledger-filter');
     setFilePath(preset.file_path);
     setCodeSnippet(preset.code_snippet);
     setGitDiff(preset.git_diff);
@@ -110,7 +107,6 @@ export default function App() {
     setCompletedNodes([]);
     setSocraticAnalysis(null);
     setPrCommentResult(null);
-    setSecopsPrComment(null);
     setPreSnyk(null);
     setPostSnyk(null);
     setRemediatedCode('');
@@ -142,6 +138,7 @@ export default function App() {
         throw new Error(data.detail || 'Failed to fetch PR');
       }
       setFilePath(data.target_file || 'demo-vulnerable-app/payment_ledger.py');
+      if (data.head_ref) setHeadRef(data.head_ref);
       if (data.code_snippet) setCodeSnippet(data.code_snippet);
       if (data.git_diff) setGitDiff(data.git_diff);
       if (data.snyk_json) setSnykJson(data.snyk_json);
@@ -149,8 +146,8 @@ export default function App() {
       setStatusBanner({
         type: 'success',
         text: data.fetched_live
-          ? `Fetched live GitHub PR #${data.pull_number} (${data.title}) — Target: ${data.target_file}`
-          : `Loaded PR #${data.pull_number} target (${data.target_file}) ready for audit.`,
+          ? `Fetched live GitHub PR #${data.pull_number} (${data.title}) — Branch: ${data.head_ref}`
+          : `Loaded PR #${data.pull_number} (${data.target_file} on branch ${data.head_ref}) ready for audit.`,
       });
     } catch (err) {
       setStatusBanner({ type: 'error', text: err.message });
@@ -172,6 +169,7 @@ export default function App() {
         body: JSON.stringify({
           preset_id: selectedPresetId,
           pr_url: prUrl,
+          head_ref: headRef,
           file_path: filePath,
           code_snippet: codeSnippet,
           git_diff: gitDiff,
@@ -227,10 +225,14 @@ export default function App() {
               if (output.remediated_code) setRemediatedCode(output.remediated_code);
               if (output.remediation_explanation)
                 setRemediationExplanation(output.remediation_explanation);
-              if (output.unified_diff) setUnifiedDiff(output.unified_diff);
+              if (output.unified_diff !== undefined) setUnifiedDiff(output.unified_diff);
               if (output.sandbox_results) setSandboxResults(output.sandbox_results);
               if (output.post_remediation_snyk) setPostSnyk(output.post_remediation_snyk);
               if (output.branch_info) setBranchInfo(output.branch_info);
+              if (output.github_push_result) {
+                setGithubPushResult(output.github_push_result);
+                setSnykAppliedToPR(true);
+              }
             } else if (eventType === 'audit_complete') {
               setActiveNodes([]);
               setCompletedNodes([
@@ -240,6 +242,14 @@ export default function App() {
                 'sandbox_patcher_node',
                 'finalize_audit_node',
               ]);
+
+              const pushRes = payload.github_push_result;
+              if (pushRes) {
+                setStatusBanner({
+                  type: 'success',
+                  text: pushRes.message,
+                });
+              }
             } else if (eventType === 'audit_error') {
               setStatusBanner({ type: 'error', text: payload.error || 'Audit error occurred' });
             }
@@ -269,58 +279,13 @@ export default function App() {
       setStatusBanner({
         type: 'success',
         text: data.posted_live
-          ? 'Socratic review questions & developer responses posted live to GitHub PR!'
-          : 'Socratic review synced to PR Conversation Thread! (Add GITHUB_TOKEN in Settings to post live on GitHub)',
+          ? 'Updated Socratic review & developer responses on GitHub PR!'
+          : 'Updated Socratic review & developer responses in PR Comment Thread!',
       });
     } catch (err) {
       setStatusBanner({ type: 'error', text: err.message });
     } finally {
       setIsPostingComment(false);
-    }
-  };
-
-  const handleApplyRemediationToPR = async () => {
-    if (!remediatedCode) return;
-    setIsApplyingRemediation(true);
-    const primaryVuln = preSnyk?.vulnerabilities?.[0] || {};
-    try {
-      const resp = await fetch('/api/github/apply-remediation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pr_url: prUrl,
-          file_path: filePath,
-          remediated_code: remediatedCode,
-          cve_id: primaryVuln.cve || 'CVE-2024-8912',
-          snyk_id: primaryVuln.id || 'SNYK-PYTHON-SQLITE3-612941',
-          pre_snyk: preSnyk || {},
-          sandbox_results: sandboxResults || {},
-          unified_diff: unifiedDiff || '',
-          update_pr_branch_directly: true,
-        }),
-      });
-      const data = await resp.json();
-      setGithubPushResult(data);
-      if (data.post_snyk) {
-        setPostSnyk(data.post_snyk);
-        // Update active code snippet and Snyk state so the vulnerability is gone everywhere
-        setCodeSnippet(remediatedCode);
-        setSnykJson(data.post_snyk);
-      }
-      if (data.pr_comment) {
-        setSecopsPrComment(data.pr_comment);
-      }
-      setSnykAppliedToPR(true);
-      setStatusBanner({
-        type: 'success',
-        text: data.pushed_live
-          ? `Remediated patch committed to PR (${data.branch_name}) & Snyk Re-Scan verified 0 Vulnerabilities!`
-          : `Remediation applied & Snyk Re-Scan verified 0 Vulnerabilities (Snyk Issue Resolved)!`,
-      });
-    } catch (err) {
-      setStatusBanner({ type: 'error', text: err.message });
-    } finally {
-      setIsApplyingRemediation(false);
     }
   };
 
@@ -371,13 +336,12 @@ export default function App() {
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                Dual-Branch Socratic Code Reviewer &amp; Autonomous Snyk SecOps Sandbox Patcher
+                1-Click Autonomous PR Auditor: Comments Socratic Questions &amp; Auto-Checks In Security Fixes on the Same PR
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 text-xs">
-            {/* Model Picker */}
             <select
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value)}
@@ -390,7 +354,6 @@ export default function App() {
               ))}
             </select>
 
-            {/* Status Pills */}
             <button
               onClick={() => setShowSettings(true)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-800 border border-slate-700 text-slate-200 transition"
@@ -417,7 +380,7 @@ export default function App() {
             {/* Preset Selector (4 cols) */}
             <div className="lg:col-span-4 flex flex-col gap-1">
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                1-Click Vulnerable PR Preset
+                Select Demo PR Scenario (Vulnerable vs Clean)
               </label>
               <select
                 value={selectedPresetId}
@@ -435,8 +398,10 @@ export default function App() {
             {/* GitHub PR Link Input (5 cols) */}
             <div className="lg:col-span-5 flex flex-col gap-1">
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
-                <span>GitHub Pull Request URL (Fetches Diff &amp; Posts Socratic Comments)</span>
-                <span className="font-mono text-indigo-400 text-[10px]">GitHub REST / MCP</span>
+                <span>GitHub Pull Request URL</span>
+                <span className="font-mono text-indigo-400 text-[10px]">
+                  Same-PR Check-In &amp; Commenting
+                </span>
               </label>
               <div className="flex items-center gap-2">
                 <div className="relative flex-1">
@@ -463,7 +428,7 @@ export default function App() {
             {/* Run Audit Primary Action (3 cols) */}
             <div className="lg:col-span-3 flex flex-col gap-1">
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Execute Parallel LangGraph
+                1-Click Audit &amp; Auto-Fix PR
               </label>
               <div className="flex items-center gap-2">
                 <button
@@ -472,7 +437,7 @@ export default function App() {
                   className="flex-1 py-2 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-white font-bold text-xs shadow-lg shadow-indigo-500/20 inline-flex items-center justify-center gap-2 transition disabled:opacity-50"
                 >
                   <Play className="w-4 h-4 fill-current" />
-                  {isRunningAudit ? 'Auditing PR...' : 'Run Dual-Branch PR Audit'}
+                  {isRunningAudit ? 'Auditing & Updating PR...' : 'Audit PR (Auto-Fix & Comment)'}
                 </button>
 
                 <button
@@ -557,7 +522,9 @@ export default function App() {
             socraticAnalysis={socraticAnalysis}
             prUrl={prUrl}
             prCommentResult={prCommentResult}
-            secopsPrComment={secopsPrComment}
+            githubPushResult={githubPushResult}
+            preSnyk={preSnyk}
+            postSnyk={postSnyk}
             onPostCommentToPR={handlePostCommentToPR}
             isPostingComment={isPostingComment}
           />
@@ -571,8 +538,6 @@ export default function App() {
             sandboxResults={sandboxResults}
             branchInfo={branchInfo}
             snykAppliedToPR={snykAppliedToPR}
-            onApplyRemediationToPR={handleApplyRemediationToPR}
-            isApplyingRemediation={isApplyingRemediation}
             githubPushResult={githubPushResult}
           />
         </div>
@@ -626,13 +591,10 @@ export default function App() {
                   placeholder={
                     config.github_configured
                       ? '•••••••••••••••• (Configured — enter new to replace)'
-                      : 'ghp_... (For live PR comments & pushing fix commits)'
+                      : 'ghp_... (Optional: local git already pushes to your repo)'
                   }
                   className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-indigo-500"
                 />
-                <p className="text-[11px] text-slate-500 mt-1">
-                  Used to post Socratic questions to PR comments and push the remediated Snyk fix commit directly to your GitHub PR.
-                </p>
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2">

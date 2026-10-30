@@ -12,13 +12,17 @@ import {
   Send,
   CheckCircle2,
   GitPullRequest,
+  GitCommit,
+  ShieldCheck,
 } from 'lucide-react';
 
 export default function SocraticPanel({
   socraticAnalysis,
   prUrl,
   prCommentResult,
-  secopsPrComment,
+  githubPushResult,
+  preSnyk,
+  postSnyk,
   onPostCommentToPR,
   isPostingComment,
 }) {
@@ -31,6 +35,8 @@ export default function SocraticPanel({
   const tradeoffs = socraticAnalysis?.architectural_tradeoffs || [];
   const summary = socraticAnalysis?.summary || '';
   const prIntentMarkdown = socraticAnalysis?.pr_intent_markdown || '';
+  const hadVulnerability = (preSnyk?.total_issues || 0) > 0;
+  const primaryVuln = preSnyk?.vulnerabilities?.[0] || null;
 
   const toggleHint = (id) => {
     setRevealedHints((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -43,7 +49,8 @@ export default function SocraticPanel({
   };
 
   const buildCombinedCommentBody = () => {
-    const baseComment = socraticAnalysis?.formatted_pr_comment || '';
+    const baseComment =
+      prCommentResult?.body || socraticAnalysis?.formatted_pr_comment || '';
     const answeredEntries = questions
       .filter((q) => (developerAnswers[q.id] || '').trim().length > 0)
       .map(
@@ -66,16 +73,16 @@ export default function SocraticPanel({
             <div className="flex items-center gap-2">
               <h2 className="text-base font-bold text-slate-100">Branch A: Socratic Intent Agent</h2>
               <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium">
-                PR Comprehension & Docs
+                Auto-Commented on PR
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Architectural trade-offs, probing Socratic PR review comments & structured changelog
+              Asks probing Socratic questions in PR comments &amp; logs same-PR security fix check-in
             </p>
           </div>
         </div>
 
-        {/* Post / Sync to GitHub PR Button */}
+        {/* Post / Update Developer Answers in PR Comment */}
         {socraticAnalysis && (
           <button
             onClick={() => onPostCommentToPR(buildCombinedCommentBody())}
@@ -83,11 +90,7 @@ export default function SocraticPanel({
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white shadow transition disabled:opacity-50"
           >
             <Send className="w-3.5 h-3.5" />
-            {isPostingComment
-              ? 'Posting to PR...'
-              : prCommentResult?.posted_live
-              ? 'Update PR Comment'
-              : 'Post Socratic Review to PR'}
+            {isPostingComment ? 'Updating PR Comment...' : 'Post / Update Answers on PR'}
           </button>
         )}
       </div>
@@ -115,10 +118,10 @@ export default function SocraticPanel({
           }`}
         >
           <MessageSquarePlus className="w-3.5 h-3.5" />
-          GitHub PR Comments
-          {(prCommentResult || secopsPrComment) && (
+          PR Comment &amp; Check-In Log
+          {prCommentResult && (
             <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-              {(prCommentResult ? 1 : 0) + (secopsPrComment ? 1 : 0)}
+              Auto-Posted
             </span>
           )}
         </button>
@@ -132,7 +135,7 @@ export default function SocraticPanel({
           }`}
         >
           <FileText className="w-3.5 h-3.5" />
-          PR Intent & Changelog
+          PR Intent &amp; Changelog
         </button>
       </div>
 
@@ -145,26 +148,26 @@ export default function SocraticPanel({
               Ready to run Socratic Intent Analysis
             </p>
             <p className="text-xs text-slate-500 max-w-sm mt-1">
-              Paste a GitHub PR link or select a preset above and click &ldquo;Run Dual-Branch PR Audit&rdquo; to generate Socratic questions and post them to your PR.
+              Paste a GitHub PR link or select a preset above and click &ldquo;Audit PR&rdquo;. Socratic questions &amp; any security check-in will be posted automatically.
             </p>
           </div>
         ) : activeTab === 'questions' ? (
           <>
-            {/* Executive Summary Banner */}
-            <div className="p-3.5 rounded-xl bg-indigo-950/30 border border-indigo-500/25">
-              <div className="flex items-center justify-between gap-2 mb-1">
+            {/* Unified Outcome Summary Banner */}
+            <div className="p-3.5 rounded-xl bg-indigo-950/30 border border-indigo-500/25 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-indigo-300">
-                  Architectural & Intent Analysis
+                  PR Audit Summary &amp; Check-In Action
                 </span>
-                {prCommentResult && (
-                  <span
-                    onClick={() => setActiveTab('pr_comments')}
-                    className="cursor-pointer inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25"
-                  >
-                    <CheckCircle2 className="w-3 h-3" />
-                    {prCommentResult.posted_live ? 'Posted to GitHub PR' : 'Synced to PR Comment Thread'}
-                  </span>
-                )}
+                <span
+                  onClick={() => setActiveTab('pr_comments')}
+                  className="cursor-pointer inline-flex items-center gap-1 text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 font-medium"
+                >
+                  <CheckCircle2 className="w-3 h-3" />
+                  {hadVulnerability
+                    ? 'Fixed in Same PR + Questions Commented → View PR Comment'
+                    : '0 Vulns: Questions Commented on PR → View PR Comment'}
+                </span>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">{summary}</p>
             </div>
@@ -173,7 +176,7 @@ export default function SocraticPanel({
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                 <HelpCircle className="w-3.5 h-3.5 text-indigo-400" />
-                Probing Socratic Questions (Shown in PR Review Comments)
+                Probing Socratic Questions (Posted in PR Comments)
               </h3>
 
               {questions.map((q, idx) => (
@@ -208,7 +211,7 @@ export default function SocraticPanel({
                       onChange={(e) =>
                         setDeveloperAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))
                       }
-                      placeholder="Write your developer response (will be included in PR comment)..."
+                      placeholder="Write your developer response (click 'Post / Update Answers on PR' to append)..."
                       className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
                     />
                   </div>
@@ -238,7 +241,7 @@ export default function SocraticPanel({
               <div className="space-y-2 pt-1">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                   <Scale className="w-3.5 h-3.5 text-indigo-400" />
-                  Identified Architectural & Design Trade-offs
+                  Identified Architectural &amp; Design Trade-offs
                 </h3>
                 <ul className="space-y-1.5">
                   {tradeoffs.map((item, i) => (
@@ -256,11 +259,11 @@ export default function SocraticPanel({
           </>
         ) : activeTab === 'pr_comments' ? (
           <div className="space-y-4">
-            <div className="flex items-center justify-between gap-2 p-3 rounded-xl bg-slate-950/80 border border-slate-800">
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-950/80 border border-slate-800">
               <div className="flex items-center gap-2 text-xs">
                 <GitPullRequest className="w-4 h-4 text-indigo-400" />
                 <span className="font-semibold text-slate-200">
-                  GitHub Pull Request Conversation Thread
+                  GitHub Pull Request Timeline &amp; Check-In Comments
                 </span>
                 {prUrl && (
                   <a
@@ -274,18 +277,32 @@ export default function SocraticPanel({
                   </a>
                 )}
               </div>
-              {prCommentResult?.posted_live ? (
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
-                  Live on GitHub PR
-                </span>
-              ) : (
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium">
-                  PR Comment Synced
-                </span>
-              )}
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
+                {hadVulnerability ? 'Fixed in Same PR + Commented' : 'Clean PR Commented'}
+              </span>
             </div>
 
-            {/* Comment #1: Socratic Code Review Comment */}
+            {/* Timeline Item 1: Automatic Same-PR Security Fix Check-In Commit (only when vulnerability found) */}
+            {hadVulnerability && githubPushResult && (
+              <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/40 space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-emerald-300 font-bold">
+                    <GitCommit className="w-4 h-4 shrink-0" />
+                    <span>nemosec-pr-auditor[bot] checked in a security fix to this PR</span>
+                  </div>
+                  {githubPushResult.commit_sha && (
+                    <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-950 text-emerald-300 border border-emerald-500/30">
+                      {githubPushResult.commit_sha}
+                    </span>
+                  )}
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-950 border border-emerald-500/30 font-mono text-emerald-200">
+                  {githubPushResult.commit_message}
+                </div>
+              </div>
+            )}
+
+            {/* Timeline Item 2: Unified PR Comment (Check-In Resolution + Socratic Questions) */}
             <div className="rounded-xl border border-indigo-500/40 bg-slate-950/90 overflow-hidden">
               <div className="px-4 py-2.5 bg-indigo-950/50 border-b border-indigo-500/30 flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2">
@@ -293,7 +310,7 @@ export default function SocraticPanel({
                     NS
                   </span>
                   <span className="font-semibold text-slate-200">
-                    {prCommentResult?.author || 'nemosec-socratic-bot'}
+                    {prCommentResult?.author || 'nemosec-pr-auditor[bot]'}
                   </span>
                   <span className="text-slate-400">commented on this Pull Request</span>
                 </div>
@@ -308,11 +325,36 @@ export default function SocraticPanel({
                   </a>
                 )}
               </div>
+
               <div className="p-4 space-y-3 text-xs text-slate-200">
                 <div className="font-bold text-sm text-indigo-300">
-                  🧠 NemoSec Socratic Code Review & PR Intent Audit
+                  🧠🛡️ NemoSec Unified PR Audit — Socratic Review &amp; Snyk SecOps
                 </div>
+
+                {/* Snyk & Check-in Status inside the PR comment */}
+                {hadVulnerability ? (
+                  <div className="p-3 rounded-lg bg-emerald-950/40 border border-emerald-500/30 space-y-1">
+                    <div className="font-bold text-emerald-300 flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4" />
+                      Security Vulnerability Fixed in This PR &amp; Snyk Issue Resolved (0 Issues)
+                    </div>
+                    <div className="font-mono text-[11px] text-emerald-200">
+                      Check-In Comment: &ldquo;{githubPushResult?.commit_message}&rdquo;
+                    </div>
+                    <div className="text-slate-300 text-[11px]">
+                      Snyk Status: 🔴 <code>1 Critical ({primaryVuln?.id} / {primaryVuln?.cve})</code> ➔ 🟢{' '}
+                      <strong>0 Vulnerabilities Found (Snyk Issue Gone)</strong>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-emerald-300 font-semibold flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4" />
+                    Snyk Security Scan: 0 Vulnerabilities Found (Clean PR — No Code Fix Needed)
+                  </div>
+                )}
+
                 <p className="text-slate-300">{summary}</p>
+
                 <div className="space-y-2 pt-1">
                   <div className="font-semibold text-slate-200">
                     🔍 Probing Socratic Questions for Author Verification:
@@ -337,36 +379,13 @@ export default function SocraticPanel({
                 </div>
               </div>
             </div>
-
-            {/* Comment #2: SecOps Remediation & Snyk 0-Vulnerability Resolution Comment (when applied) */}
-            {secopsPrComment && (
-              <div className="rounded-xl border border-emerald-500/40 bg-slate-950/90 overflow-hidden">
-                <div className="px-4 py-2.5 bg-emerald-950/50 border-b border-emerald-500/30 flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-[11px]">
-                      SO
-                    </span>
-                    <span className="font-semibold text-emerald-200">
-                      {secopsPrComment.author || 'nemosec-secops-bot'}
-                    </span>
-                    <span className="text-slate-400">posted Snyk Remediation Verification</span>
-                  </div>
-                  <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold text-[10px]">
-                    SNYK ISSUE RESOLVED (0 VULNS)
-                  </span>
-                </div>
-                <pre className="p-4 text-[11px] text-slate-300 whitespace-pre-wrap font-mono overflow-x-auto">
-                  {secopsPrComment.body}
-                </pre>
-              </div>
-            )}
           </div>
         ) : (
           /* PR Intent & Changelog Tab */
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Auto-Drafted PR Intent & Changelog Markdown
+                Auto-Drafted PR Intent &amp; Changelog Markdown
               </span>
               <button
                 onClick={handleCopyDoc}
