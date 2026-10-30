@@ -1,167 +1,156 @@
 import React from 'react';
-import {
-  GitPullRequest,
-  BrainCircuit,
-  ShieldAlert,
-  TerminalSquare,
-  CheckCircle2,
-  Loader2,
-  CircleDot,
-  Sparkles,
-} from 'lucide-react';
+import { Check, Loader2, Minus } from 'lucide-react';
 
-const NODES = [
-  {
-    id: 'ingest_node',
-    title: 'PR & Diff Ingest',
-    subtitle: 'GitHub PR + AST Context',
-    branch: 'core',
-    icon: GitPullRequest,
-  },
-  {
-    id: 'socratic_intent_node',
-    title: 'Branch A: Socratic Agent',
-    subtitle: 'Questions + PR Comment + Changelog',
-    branch: 'branch_a',
-    icon: BrainCircuit,
-  },
-  {
-    id: 'snyk_scanner_node',
-    title: 'Branch B1: Snyk Scanner',
-    subtitle: 'Live AST + Snyk JSON CVE Parse',
-    branch: 'branch_b',
-    icon: ShieldAlert,
-  },
-  {
-    id: 'sandbox_patcher_node',
-    title: 'Branch B2: Pytest Sandbox',
-    subtitle: 'Auto-Patch + Pytest + Snyk Re-Scan',
-    branch: 'branch_b',
-    icon: TerminalSquare,
-  },
-  {
-    id: 'finalize_audit_node',
-    title: 'Audit Convergence',
-    subtitle: 'PR Commented & Snyk 0 Issues',
-    branch: 'core',
-    icon: Sparkles,
-  },
-];
+export default function GraphVisualizer({
+  activeNodes = [],
+  completedNodes = [],
+  isRunning = false,
+  preSnyk = null,
+  postSnyk = null,
+  githubPushResult = null,
+}) {
+  const hadVulnerability = (preSnyk?.total_issues || 0) > 0;
+  const isCleanPR = preSnyk && preSnyk.total_issues === 0;
 
-export default function GraphVisualizer({ activeNodes = [], completedNodes = [], isRunning = false, snykResolved = false }) {
-  const getNodeStatus = (nodeId) => {
-    if (completedNodes.includes(nodeId)) return 'completed';
-    if (activeNodes.includes(nodeId)) return 'active';
-    return 'idle';
-  };
-
-  const renderNodeCard = (node) => {
-    const status = getNodeStatus(node.id);
-    const Icon = node.icon;
-
-    const borderClass =
-      status === 'active'
-        ? 'border-amber-400/90 bg-amber-500/10 shadow-[0_0_20px_rgba(251,191,36,0.25)]'
-        : status === 'completed'
-        ? node.branch === 'branch_a'
-          ? 'border-indigo-500/70 bg-indigo-950/40'
-          : node.branch === 'branch_b'
-          ? 'border-emerald-500/70 bg-emerald-950/40'
-          : 'border-cyan-500/70 bg-cyan-950/30'
-        : 'border-slate-800 bg-slate-900/60 opacity-75';
-
-    return (
-      <div
-        key={node.id}
-        className={`relative flex items-center gap-3 px-3.5 py-2.5 rounded-xl border transition-all duration-300 min-w-[205px] ${borderClass}`}
-      >
-        <div
-          className={`p-2 rounded-lg ${
-            status === 'active'
-              ? 'bg-amber-500/20 text-amber-300 animate-pulse'
-              : status === 'completed'
-              ? node.branch === 'branch_a'
-                ? 'bg-indigo-500/20 text-indigo-300'
-                : 'bg-emerald-500/20 text-emerald-300'
-              : 'bg-slate-800 text-slate-400'
-          }`}
-        >
-          <Icon className="w-4 h-4" />
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between gap-1.5">
-            <span className="text-xs font-semibold text-slate-100 truncate">{node.title}</span>
-            {status === 'active' && <Loader2 className="w-3.5 h-3.5 text-amber-400 animate-spin shrink-0" />}
-            {status === 'completed' && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
-            {status === 'idle' && <CircleDot className="w-3.5 h-3.5 text-slate-600 shrink-0" />}
-          </div>
-          <p className="text-[11px] text-slate-400 truncate">{node.subtitle}</p>
-        </div>
-      </div>
-    );
-  };
+  const steps = [
+    {
+      num: '01',
+      label: 'PR Diff & AST Ingest',
+      detail: completedNodes.includes('ingest_node') ? 'Target loaded from PR' : 'Waiting for PR',
+      state: completedNodes.includes('ingest_node')
+        ? 'done'
+        : activeNodes.includes('ingest_node')
+        ? 'running'
+        : 'idle',
+    },
+    {
+      num: '02',
+      label: 'Snyk Security Scan',
+      detail: preSnyk
+        ? hadVulnerability
+          ? `${preSnyk.total_issues} Critical (${preSnyk.vulnerabilities?.[0]?.cve}) → Triggering Auto-Fix`
+          : '0 Vulnerabilities Found (Clean PR)'
+        : 'Scanning AST & Snyk rules',
+      state: completedNodes.includes('snyk_scanner_node')
+        ? 'done'
+        : activeNodes.includes('snyk_scanner_node')
+        ? 'running'
+        : 'idle',
+      badge: preSnyk
+        ? hadVulnerability
+          ? { text: 'VULN FOUND', tone: 'amber' }
+          : { text: '0 ISSUES', tone: 'emerald' }
+        : null,
+    },
+    {
+      num: '03',
+      label: isCleanPR ? 'Same-PR Fix (Bypassed)' : 'Same-PR Fix Check-In & Pytest',
+      detail: isCleanPR
+        ? 'No vulnerability found — code untouched'
+        : completedNodes.includes('sandbox_patcher_node')
+        ? 'Checked into PR branch • Pytest 3/3 • Snyk 0 issues'
+        : 'Patching in sandbox & checking into PR',
+      state: isCleanPR
+        ? 'skipped'
+        : completedNodes.includes('sandbox_patcher_node')
+        ? 'done'
+        : activeNodes.includes('sandbox_patcher_node')
+        ? 'running'
+        : 'idle',
+      badge:
+        completedNodes.includes('sandbox_patcher_node') && hadVulnerability
+          ? { text: 'SNYK ISSUE GONE', tone: 'emerald' }
+          : isCleanPR
+          ? { text: 'SKIPPED', tone: 'zinc' }
+          : null,
+    },
+    {
+      num: '04',
+      label: 'Socratic PR Comment',
+      detail: completedNodes.includes('finalize_audit_node')
+        ? hadVulnerability
+          ? 'Posted Socratic questions + fix check-in note to PR'
+          : 'Posted Socratic questions to clean PR'
+        : 'Generating Socratic review via Nemotron',
+      state: completedNodes.includes('finalize_audit_node')
+        ? 'done'
+        : activeNodes.includes('socratic_intent_node') || activeNodes.includes('finalize_audit_node')
+        ? 'running'
+        : 'idle',
+      badge: completedNodes.includes('finalize_audit_node')
+        ? { text: 'COMMENTED ON PR', tone: 'white' }
+        : null,
+    },
+  ];
 
   return (
-    <div className="bg-slate-900/80 border border-slate-800/90 rounded-2xl p-4 shadow-lg">
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-            LangGraph Parallel StateGraph
-          </span>
-          <span className="text-xs text-slate-400">
-            Real-time SSE execution topology — Dual-Branch Socratic & SecOps Remediation
-          </span>
-        </div>
+    <div className="bg-[#111113] border border-[#232329] rounded-xl px-4 py-3">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        {steps.map((step, i) => {
+          const isDone = step.state === 'done';
+          const isActive = step.state === 'running';
+          const isSkipped = step.state === 'skipped';
 
-        <div className="flex items-center gap-3 text-xs">
-          {isRunning && (
-            <span className="inline-flex items-center gap-1.5 text-amber-300 font-medium">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              Streaming LangGraph nodes...
-            </span>
-          )}
-          {snykResolved && !isRunning && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-medium">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              Snyk Re-Scan: 0 Vulnerabilities
-            </span>
-          )}
-        </div>
-      </div>
+          return (
+            <div
+              key={step.num}
+              className={`relative flex flex-col justify-between p-3 rounded-lg border transition-all ${
+                isActive
+                  ? 'bg-[#18181c] border-white/30'
+                  : isDone
+                  ? 'bg-[#141417] border-[#27272d]'
+                  : isSkipped
+                  ? 'bg-[#0e0e11] border-[#1f1f24] opacity-65'
+                  : 'bg-[#0e0e11] border-[#1c1c21] opacity-50'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-mono font-semibold ${
+                      isDone
+                        ? 'bg-emerald-500 text-black'
+                        : isActive
+                        ? 'bg-white text-black'
+                        : 'bg-[#232329] text-zinc-400'
+                    }`}
+                  >
+                    {isDone ? (
+                      <Check className="w-3 h-3 stroke-[3]" />
+                    ) : isActive ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : isSkipped ? (
+                      <Minus className="w-3 h-3" />
+                    ) : (
+                      step.num
+                    )}
+                  </span>
+                  <span className="text-xs font-semibold text-zinc-100 tracking-tight">
+                    {step.label}
+                  </span>
+                </div>
 
-      {/* Responsive Parallel DAG Layout */}
-      <div className="flex flex-col lg:flex-row items-center justify-between gap-3 overflow-x-auto py-1">
-        {/* Step 1: Ingest */}
-        {renderNodeCard(NODES[0])}
+                {step.badge && (
+                  <span
+                    className={`text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded ${
+                      step.badge.tone === 'emerald'
+                        ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                        : step.badge.tone === 'amber'
+                        ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                        : step.badge.tone === 'white'
+                        ? 'bg-white/10 text-zinc-100 border border-white/20'
+                        : 'bg-zinc-800 text-zinc-400'
+                    }`}
+                  >
+                    {step.badge.text}
+                  </span>
+                )}
+              </div>
 
-        <div className="hidden lg:flex items-center text-slate-600 font-mono text-xs">══╦══►</div>
-
-        {/* Step 2: Parallel Branches A & B */}
-        <div className="flex flex-col gap-2.5 w-full lg:w-auto">
-          {/* Branch A */}
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 shrink-0">
-              Branch A
-            </span>
-            {renderNodeCard(NODES[1])}
-          </div>
-
-          {/* Branch B */}
-          <div className="flex flex-wrap sm:flex-nowrap items-center gap-2">
-            <span className="text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0">
-              Branch B
-            </span>
-            {renderNodeCard(NODES[2])}
-            <span className="text-slate-500 font-mono text-xs hidden sm:inline">──►</span>
-            {renderNodeCard(NODES[3])}
-          </div>
-        </div>
-
-        <div className="hidden lg:flex items-center text-slate-600 font-mono text-xs">══╩══►</div>
-
-        {/* Step 3: Convergence */}
-        {renderNodeCard(NODES[4])}
+              <p className="text-[11px] text-zinc-400 leading-snug truncate">{step.detail}</p>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

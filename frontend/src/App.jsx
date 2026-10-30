@@ -1,15 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  Shield,
   GitPullRequest,
   Play,
   Settings,
   Code,
   CheckCircle2,
   AlertCircle,
-  DownloadCloud,
   KeyRound,
   X,
+  Loader2,
+  GitCommit,
+  ShieldCheck,
 } from 'lucide-react';
 import GraphVisualizer from './components/GraphVisualizer.jsx';
 import SocraticPanel from './components/SocraticPanel.jsx';
@@ -26,15 +27,14 @@ export default function App() {
   const [snykJson, setSnykJson] = useState(null);
   const [showCodeDrawer, setShowCodeDrawer] = useState(false);
 
-  // Config & Settings modal state
   const [config, setConfig] = useState({
     nebius_configured: false,
     github_configured: false,
     nebius_model: 'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B',
     available_models: [
-      { id: 'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B', label: 'NVIDIA Nemotron-3 Nano 30B-A3B (Fast)' },
-      { id: 'nvidia/nemotron-3-super-120b', label: 'NVIDIA Nemotron-3 Super 120B (Reasoning)' },
-      { id: 'nvidia/nemotron-3.5-super-vl', label: 'NVIDIA Nemotron-3.5 Super VL' },
+      { id: 'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B', label: 'Nemotron-3 Nano 30B' },
+      { id: 'nvidia/nemotron-3-super-120b', label: 'Nemotron-3 Super 120B' },
+      { id: 'nvidia/nemotron-3.5-super-vl', label: 'Nemotron-3.5 Super VL' },
     ],
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -42,15 +42,12 @@ export default function App() {
   const [githubTokenInput, setGithubTokenInput] = useState('');
   const [selectedModel, setSelectedModel] = useState('nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B');
 
-  // LangGraph & Audit execution state
   const [isRunningAudit, setIsRunningAudit] = useState(false);
-  const [isFetchingPR, setIsFetchingPR] = useState(false);
   const [isPostingComment, setIsPostingComment] = useState(false);
   const [activeNodes, setActiveNodes] = useState([]);
   const [completedNodes, setCompletedNodes] = useState([]);
   const [statusBanner, setStatusBanner] = useState(null);
 
-  // Branch A & Branch B outputs
   const [socraticAnalysis, setSocraticAnalysis] = useState(null);
   const [prCommentResult, setPrCommentResult] = useState(null);
   const [preSnyk, setPreSnyk] = useState(null);
@@ -63,6 +60,8 @@ export default function App() {
   const [snykAppliedToPR, setSnykAppliedToPR] = useState(false);
   const [githubPushResult, setGithubPushResult] = useState(null);
 
+  const didAutoRunRef = useRef(false);
+
   useEffect(() => {
     fetchInitialData();
   }, []);
@@ -73,33 +72,45 @@ export default function App() {
         fetch('/api/config'),
         fetch('/api/presets'),
       ]);
+      let modelToUse = 'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B';
       if (cfgRes.ok) {
         const cfg = await cfgRes.json();
         setConfig(cfg);
-        setSelectedModel(cfg.nebius_model || 'nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B');
+        modelToUse = cfg.nebius_model || modelToUse;
+        setSelectedModel(modelToUse);
       }
       if (presetRes.ok) {
         const pdata = await presetRes.json();
         const list = pdata.presets || [];
         setPresets(list);
         if (list.length > 0) {
-          applyPreset(list[0]);
+          const first = list[0];
+          setSelectedPresetId(first.id);
+          setPrUrl(first.pr_url || 'https://github.com/Harinath0225/nemosec-pr-auditor/pull/1');
+          setHeadRef(first.head_ref || 'feat/merchant-ledger-filter');
+          setFilePath(first.file_path);
+          setCodeSnippet(first.code_snippet);
+          setGitDiff(first.git_diff);
+          setSnykJson(first.snyk_json);
+
+          if (!didAutoRunRef.current) {
+            didAutoRunRef.current = true;
+            executeAuditStream({
+              preset_id: first.id,
+              pr_url: first.pr_url,
+              head_ref: first.head_ref,
+              file_path: first.file_path,
+              code_snippet: first.code_snippet,
+              git_diff: first.git_diff,
+              snyk_json: first.snyk_json,
+              model_id: modelToUse,
+            });
+          }
         }
       }
     } catch (err) {
       console.error('Failed to load initial config/presets:', err);
     }
-  };
-
-  const applyPreset = (preset) => {
-    setSelectedPresetId(preset.id);
-    setPrUrl(preset.pr_url || 'https://github.com/Harinath0225/nemosec-pr-auditor/pull/1');
-    setHeadRef(preset.head_ref || 'feat/merchant-ledger-filter');
-    setFilePath(preset.file_path);
-    setCodeSnippet(preset.code_snippet);
-    setGitDiff(preset.git_diff);
-    setSnykJson(preset.snyk_json);
-    resetAuditOutputs();
   };
 
   const resetAuditOutputs = () => {
@@ -118,45 +129,85 @@ export default function App() {
     setGithubPushResult(null);
   };
 
-  const handlePresetChange = (presetId) => {
-    const found = presets.find((p) => p.id === presetId);
-    if (found) applyPreset(found);
+  const handleSelectScenario = (preset) => {
+    if (isRunningAudit) return;
+    setSelectedPresetId(preset.id);
+    setPrUrl(preset.pr_url);
+    setHeadRef(preset.head_ref || 'feat/merchant-ledger-filter');
+    setFilePath(preset.file_path);
+    setCodeSnippet(preset.code_snippet);
+    setGitDiff(preset.git_diff);
+    setSnykJson(preset.snyk_json);
+
+    executeAuditStream({
+      preset_id: preset.id,
+      pr_url: preset.pr_url,
+      head_ref: preset.head_ref,
+      file_path: preset.file_path,
+      code_snippet: preset.code_snippet,
+      git_diff: preset.git_diff,
+      snyk_json: preset.snyk_json,
+      model_id: selectedModel,
+    });
   };
 
-  const handleFetchPR = async () => {
-    if (!prUrl.trim()) return;
-    setIsFetchingPR(true);
-    setStatusBanner(null);
-    try {
-      const resp = await fetch('/api/github/fetch-pr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pr_url: prUrl.trim() }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.detail || 'Failed to fetch PR');
+  const handleAuditFromUrl = async (e) => {
+    if (e) e.preventDefault();
+    if (isRunningAudit) return;
+
+    // Fetch live PR context first if URL was edited, then stream the audit
+    let payloadToRun = {
+      preset_id: selectedPresetId,
+      pr_url: prUrl,
+      head_ref: headRef,
+      file_path: filePath,
+      code_snippet: codeSnippet,
+      git_diff: gitDiff,
+      snyk_json: snykJson,
+      model_id: selectedModel,
+    };
+
+    if (prUrl.trim()) {
+      try {
+        const resp = await fetch('/api/github/fetch-pr', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pr_url: prUrl.trim() }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          const newFile = data.target_file || filePath;
+          const newHead = data.head_ref || headRef;
+          const newCode = data.code_snippet || codeSnippet;
+          const newDiff = data.git_diff || gitDiff;
+          const newSnyk = data.snyk_json || snykJson;
+
+          setFilePath(newFile);
+          setHeadRef(newHead);
+          setCodeSnippet(newCode);
+          setGitDiff(newDiff);
+          setSnykJson(newSnyk);
+
+          payloadToRun = {
+            preset_id: selectedPresetId,
+            pr_url: prUrl.trim(),
+            head_ref: newHead,
+            file_path: newFile,
+            code_snippet: newCode,
+            git_diff: newDiff,
+            snyk_json: newSnyk,
+            model_id: selectedModel,
+          };
+        }
+      } catch (_) {
+        // Proceed with current state
       }
-      setFilePath(data.target_file || 'demo-vulnerable-app/payment_ledger.py');
-      if (data.head_ref) setHeadRef(data.head_ref);
-      if (data.code_snippet) setCodeSnippet(data.code_snippet);
-      if (data.git_diff) setGitDiff(data.git_diff);
-      if (data.snyk_json) setSnykJson(data.snyk_json);
-      resetAuditOutputs();
-      setStatusBanner({
-        type: 'success',
-        text: data.fetched_live
-          ? `Fetched live GitHub PR #${data.pull_number} (${data.title}) — Branch: ${data.head_ref}`
-          : `Loaded PR #${data.pull_number} (${data.target_file} on branch ${data.head_ref}) ready for audit.`,
-      });
-    } catch (err) {
-      setStatusBanner({ type: 'error', text: err.message });
-    } finally {
-      setIsFetchingPR(false);
     }
+
+    executeAuditStream(payloadToRun);
   };
 
-  const handleRunAudit = async () => {
+  const executeAuditStream = async (reqPayload) => {
     setIsRunningAudit(true);
     resetAuditOutputs();
     setStatusBanner(null);
@@ -167,20 +218,13 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          preset_id: selectedPresetId,
-          pr_url: prUrl,
-          head_ref: headRef,
-          file_path: filePath,
-          code_snippet: codeSnippet,
-          git_diff: gitDiff,
-          snyk_json: snykJson,
-          model_id: selectedModel,
+          ...reqPayload,
           auto_post_pr_comment: true,
         }),
       });
 
       if (!response.ok || !response.body) {
-        throw new Error(`Audit stream failed with status ${response.status}`);
+        throw new Error(`Audit stream failed (${response.status})`);
       }
 
       const reader = response.body.getReader();
@@ -242,19 +286,11 @@ export default function App() {
                 'sandbox_patcher_node',
                 'finalize_audit_node',
               ]);
-
-              const pushRes = payload.github_push_result;
-              if (pushRes) {
-                setStatusBanner({
-                  type: 'success',
-                  text: pushRes.message,
-                });
-              }
             } else if (eventType === 'audit_error') {
               setStatusBanner({ type: 'error', text: payload.error || 'Audit error occurred' });
             }
           } catch (parseErr) {
-            console.warn('SSE chunk parse notice:', parseErr);
+            console.warn('SSE parse notice:', parseErr);
           }
         }
       }
@@ -278,9 +314,7 @@ export default function App() {
       setPrCommentResult(data);
       setStatusBanner({
         type: 'success',
-        text: data.posted_live
-          ? 'Updated Socratic review & developer responses on GitHub PR!'
-          : 'Updated Socratic review & developer responses in PR Comment Thread!',
+        text: 'Synced author responses to PR review comment.',
       });
     } catch (err) {
       setStatusBanner({ type: 'error', text: err.message });
@@ -307,45 +341,37 @@ export default function App() {
         setNebiusKeyInput('');
         setGithubTokenInput('');
         setShowSettings(false);
-        setStatusBanner({
-          type: 'success',
-          text: 'Configuration saved to .env and applied to runtime!',
-        });
       }
     } catch (err) {
       setStatusBanner({ type: 'error', text: err.message });
     }
   };
 
+  const hadVulnerability = (preSnyk?.total_issues || 0) > 0;
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* Top Header Bar */}
-      <header className="border-b border-slate-800/90 bg-slate-900/90 backdrop-blur sticky top-0 z-30">
-        <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+    <div className="min-h-screen bg-[#09090b] text-[#f4f4f5] flex flex-col">
+      {/* Top Navigation Bar */}
+      <header className="border-b border-[#1f1f24] bg-[#09090b]/90 backdrop-blur sticky top-0 z-30">
+        <div className="max-w-[1480px] mx-auto px-5 h-14 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gradient-to-br from-indigo-500/20 to-emerald-500/20 border border-emerald-500/30 text-emerald-400">
-              <Shield className="w-6 h-6" />
+            <div className="w-7 h-7 rounded-lg bg-white text-black flex items-center justify-center font-mono font-bold text-xs">
+              NS
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-extrabold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-emerald-300 bg-clip-text text-transparent">
-                  NemoSec &amp; Socratic PR Auditor
-                </h1>
-                <span className="text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                  Nebius Nemotron + LangGraph
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">
-                1-Click Autonomous PR Auditor: Comments Socratic Questions &amp; Auto-Checks In Security Fixes on the Same PR
-              </p>
+            <div className="flex items-center gap-2.5">
+              <span className="font-semibold text-sm tracking-tight text-white">NemoSec</span>
+              <span className="text-zinc-600">/</span>
+              <span className="text-xs text-zinc-400">
+                Autonomous PR Socratic Reviewer &amp; Snyk Auto-Fixer
+              </span>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5 text-xs">
+          <div className="flex items-center gap-2.5 text-xs">
             <select
               value={selectedModel}
               onChange={(e) => setSelectedModel(e.target.value)}
-              className="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 font-mono text-xs focus:outline-none focus:border-indigo-500"
+              className="px-2.5 py-1.5 rounded-md bg-[#121215] border border-[#232329] text-zinc-300 font-mono text-[11px] focus:outline-none focus:border-zinc-500"
             >
               {config.available_models.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -355,208 +381,234 @@ export default function App() {
             </select>
 
             <button
-              onClick={() => setShowSettings(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-800 border border-slate-700 text-slate-200 transition"
+              onClick={() => setShowCodeDrawer(!showCodeDrawer)}
+              className={`px-2.5 py-1.5 rounded-md border text-xs font-mono inline-flex items-center gap-1.5 transition ${
+                showCodeDrawer
+                  ? 'bg-white text-black border-white'
+                  : 'bg-[#121215] border-[#232329] text-zinc-300 hover:border-zinc-600'
+              }`}
             >
-              <Settings className="w-3.5 h-3.5 text-indigo-400" />
-              <span>API &amp; GitHub Keys</span>
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  config.nebius_configured && config.github_configured
-                    ? 'bg-emerald-400'
-                    : 'bg-amber-400'
-                }`}
-              />
+              <Code className="w-3.5 h-3.5" />
+              <span>Source</span>
+            </button>
+
+            <button
+              onClick={() => setShowSettings(true)}
+              className="px-2.5 py-1.5 rounded-md bg-[#121215] hover:bg-[#18181d] border border-[#232329] text-zinc-300 inline-flex items-center gap-1.5 transition"
+            >
+              <Settings className="w-3.5 h-3.5 text-zinc-400" />
+              <span>Keys</span>
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Container */}
-      <main className="max-w-[1600px] w-full mx-auto px-4 sm:px-6 py-4 flex-1 flex flex-col gap-4">
-        {/* PR Link & Demo Control Bar */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-lg space-y-3">
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center">
-            {/* Preset Selector (4 cols) */}
-            <div className="lg:col-span-4 flex flex-col gap-1">
-              <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Select Demo PR Scenario (Vulnerable vs Clean)
-              </label>
-              <select
-                value={selectedPresetId}
-                onChange={(e) => handlePresetChange(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-              >
-                {presets.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
+      {/* Main Content */}
+      <main className="max-w-[1480px] w-full mx-auto px-5 py-5 flex-1 flex flex-col gap-4">
+        {/* Clean Single-Row PR Bar + Scenario Switcher */}
+        <div className="bg-[#111113] border border-[#232329] rounded-xl p-3.5 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+          {/* PR URL Input + Primary Action */}
+          <form onSubmit={handleAuditFromUrl} className="flex items-center gap-2 flex-1">
+            <div className="relative flex-1">
+              <GitPullRequest className="w-4 h-4 text-zinc-500 absolute left-3.5 top-2.5" />
+              <input
+                type="text"
+                value={prUrl}
+                onChange={(e) => setPrUrl(e.target.value)}
+                placeholder="Paste GitHub PR URL (e.g. https://github.com/owner/repo/pull/1)"
+                className="w-full pl-10 pr-3 py-2 rounded-lg bg-[#09090b] border border-[#25252c] text-xs font-mono text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-400"
+              />
             </div>
 
-            {/* GitHub PR Link Input (5 cols) */}
-            <div className="lg:col-span-5 flex flex-col gap-1">
-              <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center justify-between">
-                <span>GitHub Pull Request URL</span>
-                <span className="font-mono text-indigo-400 text-[10px]">
-                  Same-PR Check-In &amp; Commenting
-                </span>
-              </label>
-              <div className="flex items-center gap-2">
-                <div className="relative flex-1">
-                  <GitPullRequest className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-                  <input
-                    type="text"
-                    value={prUrl}
-                    onChange={(e) => setPrUrl(e.target.value)}
-                    placeholder="https://github.com/owner/repo/pull/1"
-                    className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-                <button
-                  onClick={handleFetchPR}
-                  disabled={isFetchingPR}
-                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 shrink-0 transition disabled:opacity-50"
-                >
-                  <DownloadCloud className="w-3.5 h-3.5 text-indigo-400" />
-                  {isFetchingPR ? 'Fetching...' : 'Load PR'}
-                </button>
-              </div>
-            </div>
-
-            {/* Run Audit Primary Action (3 cols) */}
-            <div className="lg:col-span-3 flex flex-col gap-1">
-              <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                1-Click Audit &amp; Auto-Fix PR
-              </label>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleRunAudit}
-                  disabled={isRunningAudit}
-                  className="flex-1 py-2 px-4 rounded-xl bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-500 hover:to-emerald-500 text-white font-bold text-xs shadow-lg shadow-indigo-500/20 inline-flex items-center justify-center gap-2 transition disabled:opacity-50"
-                >
-                  <Play className="w-4 h-4 fill-current" />
-                  {isRunningAudit ? 'Auditing & Updating PR...' : 'Audit PR (Auto-Fix & Comment)'}
-                </button>
-
-                <button
-                  onClick={() => setShowCodeDrawer(!showCodeDrawer)}
-                  title="Inspect / Edit Source Code & Diff"
-                  className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 transition"
-                >
-                  <Code className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Status Notification Banner */}
-          {statusBanner && (
-            <div
-              className={`px-3.5 py-2 rounded-xl border text-xs flex items-center justify-between gap-2 ${
-                statusBanner.type === 'error'
-                  ? 'bg-rose-950/50 border-rose-500/40 text-rose-200'
-                  : 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
-              }`}
+            <button
+              type="submit"
+              disabled={isRunningAudit}
+              className="px-4 py-2 rounded-lg bg-white hover:bg-zinc-200 text-black font-semibold text-xs inline-flex items-center gap-2 shrink-0 transition disabled:opacity-60"
             >
-              <div className="flex items-center gap-2">
-                {statusBanner.type === 'error' ? (
-                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                )}
-                <span>{statusBanner.text}</span>
-              </div>
-              <button
-                onClick={() => setStatusBanner(null)}
-                className="text-slate-400 hover:text-slate-200"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
+              {isRunningAudit ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Auditing PR...</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Audit Pull Request</span>
+                </>
+              )}
+            </button>
+          </form>
 
-          {/* Collapsible Source Code & Git Diff Inspector */}
-          {showCodeDrawer && (
-            <div className="pt-2 border-t border-slate-800 grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div>
-                <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                  <span className="font-mono">Target File: {filePath}</span>
-                  <span className="text-[11px]">Editable Python Source</span>
-                </div>
-                <textarea
-                  value={codeSnippet}
-                  onChange={(e) => setCodeSnippet(e.target.value)}
-                  rows={10}
-                  className="w-full p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-              <div>
-                <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-                  <span className="font-mono">Git Diff Payload</span>
-                  <span className="text-[11px]">PR Patch Context</span>
-                </div>
-                <textarea
-                  value={gitDiff}
-                  onChange={(e) => setGitDiff(e.target.value)}
-                  rows={10}
-                  className="w-full p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-            </div>
-          )}
+          {/* 3 Instant Scenario Pills */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-mono text-zinc-500 mr-1">Demo PRs:</span>
+            {presets.map((p, index) => {
+              const isSelected = selectedPresetId === p.id;
+              const isClean = p.id === 'clean_pr_no_vulns';
+              const shortLabel =
+                index === 0
+                  ? 'PR #1 · SQL Injection (Auto-Fix)'
+                  : index === 1
+                  ? 'PR #2 · Command Injection (Auto-Fix)'
+                  : 'PR #3 · Clean PR (Comment Only)';
+
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => handleSelectScenario(p)}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition inline-flex items-center gap-1.5 ${
+                    isSelected
+                      ? 'bg-[#1f1f26] text-white border-zinc-500'
+                      : 'bg-[#09090b] text-zinc-400 border-[#232329] hover:text-zinc-200 hover:border-zinc-700'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      isClean ? 'bg-emerald-400' : 'bg-amber-400'
+                    }`}
+                  />
+                  <span>{shortLabel}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        {/* Live LangGraph DAG Visualizer */}
+        {/* Collapsible Raw Source & Diff Editor */}
+        {showCodeDrawer && (
+          <div className="bg-[#111113] border border-[#232329] rounded-xl p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div>
+              <div className="text-[11px] font-mono text-zinc-400 mb-1.5">
+                Target File: {filePath}
+              </div>
+              <textarea
+                value={codeSnippet}
+                onChange={(e) => setCodeSnippet(e.target.value)}
+                rows={8}
+                className="w-full p-3 rounded-lg bg-[#09090b] border border-[#232329] font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+              />
+            </div>
+            <div>
+              <div className="text-[11px] font-mono text-zinc-400 mb-1.5">PR Git Diff</div>
+              <textarea
+                value={gitDiff}
+                onChange={(e) => setGitDiff(e.target.value)}
+                rows={8}
+                className="w-full p-3 rounded-lg bg-[#09090b] border border-[#232329] font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* 4-Step Pipeline Stepper */}
         <GraphVisualizer
           activeNodes={activeNodes}
           completedNodes={completedNodes}
           isRunning={isRunningAudit}
-          snykResolved={Boolean(postSnyk && postSnyk.ok)}
+          preSnyk={preSnyk}
+          postSnyk={postSnyk}
+          githubPushResult={githubPushResult}
         />
 
-        {/* Dual-Branch Split-Screen Panels */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 flex-1 min-h-[540px]">
-          <SocraticPanel
-            socraticAnalysis={socraticAnalysis}
-            prUrl={prUrl}
-            prCommentResult={prCommentResult}
-            githubPushResult={githubPushResult}
-            preSnyk={preSnyk}
-            postSnyk={postSnyk}
-            onPostCommentToPR={handlePostCommentToPR}
-            isPostingComment={isPostingComment}
-          />
+        {/* Full-Width Outcome Banner (Immediately reflects the exact PR behavior) */}
+        {preSnyk && !isRunningAudit && (
+          <div
+            className={`rounded-xl border px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs ${
+              hadVulnerability
+                ? 'bg-emerald-500/[0.07] border-emerald-500/30 text-zinc-100'
+                : 'bg-[#111113] border-[#27272f] text-zinc-200'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              {hadVulnerability ? (
+                <GitCommit className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <div>
+                <span className="font-semibold text-white mr-2">
+                  {hadVulnerability
+                    ? 'Vulnerability Found → Auto-Fixed in Same PR & Socratic Questions Commented:'
+                    : 'No Security Vulnerability Found → PR Commented with Socratic Questions Only:'}
+                </span>
+                <span className="font-mono text-zinc-300">
+                  {hadVulnerability
+                    ? githubPushResult?.commit_message || branchInfo?.commit_message
+                    : '0 Snyk issues detected. Code left untouched; Socratic review posted to PR.'}
+                </span>
+              </div>
+            </div>
 
-          <SecOpsPanel
-            preSnyk={preSnyk}
-            postSnyk={postSnyk}
-            remediatedCode={remediatedCode}
-            remediationExplanation={remediationExplanation}
-            unifiedDiff={unifiedDiff}
-            sandboxResults={sandboxResults}
-            branchInfo={branchInfo}
-            snykAppliedToPR={snykAppliedToPR}
-            githubPushResult={githubPushResult}
-          />
+            <div className="flex items-center gap-2 font-mono text-[11px]">
+              <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                Snyk: 0 Vulnerabilities
+              </span>
+            </div>
+          </div>
+        )}
+
+        {statusBanner && (
+          <div className="rounded-lg border border-[#27272f] bg-[#141418] px-3.5 py-2 text-xs flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {statusBanner.type === 'error' ? (
+                <AlertCircle className="w-4 h-4 text-rose-400" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              )}
+              <span>{statusBanner.text}</span>
+            </div>
+            <button onClick={() => setStatusBanner(null)} className="text-zinc-400 hover:text-white">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Main Two-Column Workspace */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 flex-1 items-start">
+          {/* Left 6 Cols: GitHub PR Review Comment & Socratic Questions */}
+          <div className="lg:col-span-6">
+            <SocraticPanel
+              socraticAnalysis={socraticAnalysis}
+              prUrl={prUrl}
+              prCommentResult={prCommentResult}
+              githubPushResult={githubPushResult}
+              preSnyk={preSnyk}
+              postSnyk={postSnyk}
+              onPostCommentToPR={handlePostCommentToPR}
+              isPostingComment={isPostingComment}
+            />
+          </div>
+
+          {/* Right 6 Cols: Same-PR Fix Check-In Diff, Snyk Before/After & Pytest Logs */}
+          <div className="lg:col-span-6">
+            <SecOpsPanel
+              preSnyk={preSnyk}
+              postSnyk={postSnyk}
+              remediatedCode={remediatedCode}
+              remediationExplanation={remediationExplanation}
+              unifiedDiff={unifiedDiff}
+              sandboxResults={sandboxResults}
+              branchInfo={branchInfo}
+              snykAppliedToPR={snykAppliedToPR}
+              githubPushResult={githubPushResult}
+            />
+          </div>
         </div>
       </main>
 
-      {/* API & GitHub Token Settings Modal */}
+      {/* Settings Modal */}
       {showSettings && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#111113] border border-[#27272f] rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-[#232329] pb-3">
               <div className="flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-indigo-400" />
-                <h3 className="text-sm font-bold text-slate-100">
-                  Nebius Token Factory &amp; GitHub PR Credentials
-                </h3>
+                <KeyRound className="w-4 h-4 text-zinc-300" />
+                <h3 className="text-sm font-semibold text-white">API &amp; GitHub Credentials</h3>
               </div>
               <button
                 onClick={() => setShowSettings(false)}
-                className="text-slate-400 hover:text-slate-200"
+                className="text-zinc-400 hover:text-white"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -564,24 +616,22 @@ export default function App() {
 
             <form onSubmit={handleSaveSettings} className="space-y-3 text-xs">
               <div>
-                <label className="block text-slate-300 font-medium mb-1">
-                  Nebius Token Factory API Key (<code>NEBIUS_API_KEY</code>)
+                <label className="block text-zinc-300 font-medium mb-1">
+                  Nebius API Key (<code>NEBIUS_API_KEY</code>)
                 </label>
                 <input
                   type="password"
                   value={nebiusKeyInput}
                   onChange={(e) => setNebiusKeyInput(e.target.value)}
                   placeholder={
-                    config.nebius_configured
-                      ? '•••••••••••••••• (Configured — enter new to replace)'
-                      : 'Enter Nebius API key...'
+                    config.nebius_configured ? '•••••••• (Configured)' : 'Enter Nebius API key...'
                   }
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 rounded-lg bg-[#09090b] border border-[#25252c] text-zinc-100 focus:outline-none focus:border-zinc-400"
                 />
               </div>
 
               <div>
-                <label className="block text-slate-300 font-medium mb-1">
+                <label className="block text-zinc-300 font-medium mb-1">
                   GitHub Personal Access Token (<code>GITHUB_TOKEN</code>)
                 </label>
                 <input
@@ -590,10 +640,10 @@ export default function App() {
                   onChange={(e) => setGithubTokenInput(e.target.value)}
                   placeholder={
                     config.github_configured
-                      ? '•••••••••••••••• (Configured — enter new to replace)'
-                      : 'ghp_... (Optional: local git already pushes to your repo)'
+                      ? '•••••••• (Configured)'
+                      : 'ghp_... (For live GitHub PR comment API)'
                   }
-                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-800 text-slate-200 focus:outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 rounded-lg bg-[#09090b] border border-[#25252c] text-zinc-100 focus:outline-none focus:border-zinc-400"
                 />
               </div>
 
@@ -601,15 +651,15 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setShowSettings(false)}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  className="px-3 py-1.5 rounded-lg bg-[#1a1a1f] text-zinc-300 hover:bg-[#232329]"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold"
+                  className="px-4 py-1.5 rounded-lg bg-white text-black font-semibold hover:bg-zinc-200"
                 >
-                  Save to .env
+                  Save
                 </button>
               </div>
             </form>
