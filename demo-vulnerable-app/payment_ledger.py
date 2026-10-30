@@ -1,7 +1,6 @@
 """
 Microservice ledger lookup module (Demo Target for GitHub PR Audit).
-Contains an intentional SQL Injection vulnerability (CWE-89 / SNYK-PYTHON-SQLITE3-612941)
-introduced during a performance-caching refactor.
+Remediated by NemoSec SecOps Agent: Parameterized SQL queries & strict type validation.
 """
 import sqlite3
 from typing import Dict, Any, List
@@ -38,16 +37,19 @@ def lookup_merchant_transactions(
 ) -> List[Dict[str, Any]]:
     """
     Fetch settled transactions for a merchant above a minimum threshold.
-    WARNING: Vulnerable f-string SQL query construction introduced in PR!
+    REMEDIATED: Uses DB-API 2.0 parameterized query placeholders (?) to prevent CWE-89 SQL Injection.
     """
+    if not isinstance(merchant_id, str) or not merchant_id.strip():
+        raise ValueError("Invalid merchant_id")
+    safe_min_amount = int(min_amount_cents)
+
     cursor = conn.cursor()
-    # VULNERABLE: Direct string interpolation allows SQL Injection (CWE-89)
     query = (
-        f"SELECT id, merchant_id, amount_cents, status FROM transactions "
-        f"WHERE merchant_id = '{merchant_id}' AND amount_cents >= {min_amount_cents} "
-        f"AND status = 'SETTLED'"
+        "SELECT id, merchant_id, amount_cents, status FROM transactions "
+        "WHERE merchant_id = ? AND amount_cents >= ? "
+        "AND status = 'SETTLED'"
     )
-    cursor.execute(query)
+    cursor.execute(query, (merchant_id, safe_min_amount))
     rows = cursor.fetchall()
     return [
         {
